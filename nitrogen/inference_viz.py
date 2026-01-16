@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import cv2
 import av
@@ -192,7 +193,7 @@ def draw_button_grid(img, x, y, button_size, buttons, current_row, token_set):
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
 class VideoRecorder:
-    def __init__(self, output_file, fps=30, crf=28, preset="fast"):
+    def __init__(self, output_file, fps=30, crf=28, preset="fast", enabled=None):
         """
         Initialize a video recorder using PyAV.
         
@@ -201,16 +202,22 @@ class VideoRecorder:
             fps (int): Frames per second
             crf (int): Constant Rate Factor (0-51, higher means smaller file but lower quality)
             preset (str): Encoding preset (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow)
+            enabled (bool | None): Whether to record. Defaults to env override via NITROGEN_DISABLE_DEBUG_RECORDING.
         """
         self.output_file = output_file
         self.fps = fps
         self.crf = str(crf)
         self.preset = preset
-        self.container = av.open(output_file, mode="w")
+        if enabled is None:
+            enabled = os.getenv("NITROGEN_DISABLE_DEBUG_RECORDING", "0") != "1"
+        self.enabled = enabled
+        self.container = av.open(output_file, mode="w") if self.enabled else None
         self.stream = None
         
     def init_stream(self, width, height):
         """Initialize the video stream with the frame dimensions."""
+        if not self.enabled:
+            return
         self.stream = self.container.add_stream("h264", rate=self.fps)
         self.stream.width = width
         self.stream.height = height
@@ -227,6 +234,8 @@ class VideoRecorder:
         Args:
             frame (numpy.ndarray): Frame as RGB numpy array
         """
+        if not self.enabled:
+            return
         if self.stream is None:
             self.init_stream(frame.shape[1], frame.shape[0])
             
@@ -236,6 +245,8 @@ class VideoRecorder:
         
     def close(self):
         """Flush remaining packets and close the video file."""
+        if not self.enabled:
+            return
         try:
             if self.stream is not None:
                 for packet in self.stream.encode():
