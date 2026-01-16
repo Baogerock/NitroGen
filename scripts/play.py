@@ -85,6 +85,8 @@ for i in range(3):
 
 env = GamepadEnv(
     game=args.process,
+    image_height=720,
+    image_width=1280,
     game_speed=1.0,
     env_fps=30,
     async_mode=True,
