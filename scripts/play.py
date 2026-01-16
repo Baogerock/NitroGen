@@ -11,7 +11,6 @@ from PIL import Image
 
 from nitrogen.game_env import GamepadEnv
 from nitrogen.shared import BUTTON_ACTION_TOKENS, PATH_REPO
-from nitrogen.inference_viz import create_viz, VideoRecorder
 from nitrogen.inference_client import ModelClient
 
 import argparse
@@ -30,26 +29,20 @@ action_downsample_ratio = policy_info["action_downsample_ratio"]
 CKPT_NAME = Path(policy_info["ckpt_path"]).stem
 NO_MENU = not args.allow_menu
 
-PATH_DEBUG = PATH_REPO / "debug"
-PATH_DEBUG.mkdir(parents=True, exist_ok=True)
-
 PATH_OUT = (PATH_REPO / "out" / CKPT_NAME).resolve()
 PATH_OUT.mkdir(parents=True, exist_ok=True)
 
 BUTTON_PRESS_THRES = 0.5
 
-# Find in path_out the list of existing video files, named 0001.mp4, 0002.mp4, etc.
-# If they exist, find the max number and set the next number to be max + 1
-video_files = sorted(PATH_OUT.glob("*_DEBUG.mp4"))
-if video_files:
-    existing_numbers = [f.name.split("_")[0] for f in video_files]
+# Find in path_out the list of existing action files to determine the next number.
+action_files = sorted(PATH_OUT.glob("*_ACTIONS.json"))
+if action_files:
+    existing_numbers = [f.name.split("_")[0] for f in action_files]
     existing_numbers = [int(n) for n in existing_numbers if n.isdigit()]
     next_number = max(existing_numbers) + 1
 else:
     next_number = 1
 
-PATH_MP4_DEBUG = PATH_OUT / f"{next_number:04d}_DEBUG.mp4"
-PATH_MP4_CLEAN = PATH_OUT / f"{next_number:04d}_CLEAN.mp4"
 PATH_ACTIONS = PATH_OUT / f"{next_number:04d}_ACTIONS.json"
 
 def preprocess_img(main_image):
@@ -92,8 +85,10 @@ for i in range(3):
 
 env = GamepadEnv(
     game=args.process,
+    image_height=720,
+    image_width=1280,
     game_speed=1.0,
-    env_fps=60,
+    env_fps=30,
     async_mode=True,
 )
 
@@ -146,87 +141,66 @@ obs, reward, terminated, truncated, info = env.step(action=zero_action)
 frames = None
 step_count = 0
 
-with VideoRecorder(str(PATH_MP4_DEBUG), fps=60, crf=32, preset="medium") as debug_recorder:
-    with VideoRecorder(str(PATH_MP4_CLEAN), fps=60, crf=28, preset="medium") as clean_recorder:
-        try:
-            while True:
-                obs = preprocess_img(obs)
-                obs.save(PATH_DEBUG / f"{step_count:05d}.png")
+try:
+    while True:
+        obs = preprocess_img(obs)
 
-                pred = policy.predict(obs)
+        pred = policy.predict(obs)
 
-                j_left, j_right, buttons = pred["j_left"], pred["j_right"], pred["buttons"]
+        j_left, j_right, buttons = pred["j_left"], pred["j_right"], pred["buttons"]
 
-                n = len(buttons)
-                assert n == len(j_left) == len(j_right), "Mismatch in action lengths"
+        n = len(buttons)
+        assert n == len(j_left) == len(j_right), "Mismatch in action lengths"
 
+        env_actions = []
 
-                env_actions = []
+        for i in range(n):
+            move_action = zero_action.copy()
 
-                for i in range(n):
-                    move_action = zero_action.copy()
+            xl, yl = j_left[i]
+            xr, yr = j_right[i]
+            move_action["AXIS_LEFTX"] = np.array([int(xl * 32767)], dtype=np.long)
+            move_action["AXIS_LEFTY"] = np.array([int(yl * 32767)], dtype=np.long)
+            move_action["AXIS_RIGHTX"] = np.array([int(xr * 32767)], dtype=np.long)
+            move_action["AXIS_RIGHTY"] = np.array([int(yr * 32767)], dtype=np.long)
 
-                    xl, yl = j_left[i]
-                    xr, yr = j_right[i]
-                    move_action["AXIS_LEFTX"] = np.array([int(xl * 32767)], dtype=np.long)
-                    move_action["AXIS_LEFTY"] = np.array([int(yl * 32767)], dtype=np.long)
-                    move_action["AXIS_RIGHTX"] = np.array([int(xr * 32767)], dtype=np.long)
-                    move_action["AXIS_RIGHTY"] = np.array([int(yr * 32767)], dtype=np.long)
-                    
-                    button_vector = buttons[i]
-                    assert len(button_vector) == len(TOKEN_SET), "Button vector length does not match token set length"
+            button_vector = buttons[i]
+            assert len(button_vector) == len(TOKEN_SET), "Button vector length does not match token set length"
 
-                    
-                    for name, value in zip(TOKEN_SET, button_vector):
-                        if "TRIGGER" in name:
-                            move_action[name] =  np.array([value * 255], dtype=np.long)
-                        else:
-                            move_action[name] = 1 if value > BUTTON_PRESS_THRES else 0
+            for name, value in zip(TOKEN_SET, button_vector):
+                if "TRIGGER" in name:
+                    move_action[name] = np.array([value * 255], dtype=np.long)
+                else:
+                    move_action[name] = 1 if value > BUTTON_PRESS_THRES else 0
 
+            env_actions.append(move_action)
 
-                    env_actions.append(move_action)
+        print(f"Executing {len(env_actions)} actions, each action will be repeated {action_downsample_ratio} times")
 
-                print(f"Executing {len(env_actions)} actions, each action will be repeated {action_downsample_ratio} times")
+        for i, a in enumerate(env_actions):
+            if NO_MENU:
+                if a["START"]:
+                    print("Model predicted start, disabling this action")
+                a["GUIDE"] = 0
+                a["START"] = 0
+                a["BACK"] = 0
 
-                for i, a in enumerate(env_actions):
-                    if NO_MENU:
-                        if a["START"]:
-                            print("Model predicted start, disabling this action")
-                        a["GUIDE"] = 0
-                        a["START"] = 0
-                        a["BACK"] = 0
+            for _ in range(action_downsample_ratio):
+                obs, reward, terminated, truncated, info = env.step(action=a)
 
-                    for _ in range(action_downsample_ratio):
-                        obs, reward, terminated, truncated, info = env.step(action=a)
+        # Append env_actions dictionnary to JSONL file
+        with open(PATH_ACTIONS, "a") as f:
+            for i, a in enumerate(env_actions):
+                # convert numpy arrays to lists for JSON serialization
+                for k, v in a.items():
+                    if isinstance(v, np.ndarray):
+                        a[k] = v.tolist()
+                a["step"] = step_count
+                a["substep"] = i
+                json.dump(a, f)
+                f.write("\n")
 
-                        # resize obs to 720p
-                        obs_viz = np.array(obs).copy()
-                        clean_viz = cv2.resize(obs_viz, (1920, 1080), interpolation=cv2.INTER_AREA)
-                        debug_viz = create_viz(
-                            cv2.resize(obs_viz, (1280, 720), interpolation=cv2.INTER_AREA), # 720p
-                            i,
-                            j_left,
-                            j_right,
-                            buttons,
-                            token_set=TOKEN_SET
-                        )
-                        debug_recorder.add_frame(debug_viz)
-                        clean_recorder.add_frame(clean_viz)
-
-                # Append env_actions dictionnary to JSONL file
-                with open(PATH_ACTIONS, "a") as f:
-                    for i, a in enumerate(env_actions):
-                        # convert numpy arrays to lists for JSON serialization
-                        for k, v in a.items():
-                            if isinstance(v, np.ndarray):
-                                a[k] = v.tolist()
-                        a["step"] = step_count
-                        a["substep"] = i
-                        json.dump(a, f)
-                        f.write("\n")
-
-
-                step_count += 1
-        finally:
-            env.unpause()
-            env.close()
+        step_count += 1
+finally:
+    env.unpause()
+    env.close()
